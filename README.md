@@ -448,18 +448,6 @@ Success rate is 100 percent (10/10)
 
 ---
 
-### Troubleshooting Rápido
-
-| Síntoma | Causa probable | Solución |
-|---|---|---|
-| `Tunnel0` en `down/down` | Sin conectividad WAN o tunnel destination incorrecto | Verificar `ping 192.168.19.6` desde R1 antes de revisar GRE |
-| IKEv2 SA no aparece | ACL no hace match del tráfico GRE | Revisar `permit gre host <src> host <dst>` — usar `gre`, no `ip` |
-| Estado `DELETED` en IKEv2 | PSK incorrecta o `match identity remote` apunta a IP errónea | Verificar que la PSK sea idéntica y el profile apunte a la IP WAN correcta |
-| GRE up pero sin cifrado | Falta `set ikev2-profile` en el Crypto Map | Confirmar `set ikev2-profile IKEv2_PROFILE` dentro del `crypto map` |
-| ACL sin hits pese a tráfico | Crypto Map no aplicado en `e0/0` | Verificar `crypto map CMAP_GRE_IKEv2` en `interface Ethernet0/0` |
-
----
-
 ## 7. Capturas de Pantalla
 
 | # | Captura | Descripción |
