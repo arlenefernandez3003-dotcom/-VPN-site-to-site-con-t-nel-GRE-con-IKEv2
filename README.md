@@ -32,21 +32,26 @@ Seguridad de Redes · Prof. Jonathan Esteban Rondón Corniel
 
 Implementar y verificar una **VPN Site-to-Site con túnel GRE protegido por IPSec IKEv2** en routers Cisco IOS dentro de PNetLab. La práctica cubre:
 
-- Creación de un **túnel GRE** entre R1 y R2 como capa de encapsulamiento multiprotocolo sobre la red pública.
-- Protección criptográfica del tráfico GRE mediante **IPSec IKEv2** usando Crypto Map, cifrando los paquetes GRE con la negociación moderna de 4 mensajes de IKEv2.
-- Uso de una **ACL de tráfico interesante** que captura el protocolo GRE (protocolo IP 47) entre las IPs WAN de los peers para activar el cifrado IPSec.
+- Creación de un **túnel GRE** entre R1 y R2 con `tunnel mode gre ip`, que permite transportar tráfico multiprotocolo y aplicar rutas estáticas sobre la interfaz lógica.
+- Protección criptográfica del túnel GRE mediante **IPSec IKEv2** aplicado directamente con `tunnel protection ipsec profile` sobre la interfaz `Tunnel0`, usando el Transform Set en **modo transport** (ya que GRE se encarga de la encapsulación).
+- Configuración del **IKEv2 Keyring** con `pre-shared-key local` y `pre-shared-key remote` por separado, requerido por IOSv para que la negociación funcione correctamente.
 - Validación del túnel con comandos `show crypto ikev2` y `show interface tunnel`, y pruebas de conectividad entre `202.50.73.128/25` (Site A) y `202.50.73.0/25` (Site B).
 
-### ¿Qué aporta IKEv2 sobre GRE?
+### Diferencia clave respecto a otros labs GRE/IPSec
 
-Respecto al Lab 03 (GRE over IKEv1), la arquitectura de encapsulamiento es idéntica. El cambio está en la negociación del canal seguro: IKEv2 usa solo 4 mensajes (vs 9 de IKEv1), tiene resistencia nativa a ataques de DoS, y su sintaxis en Cisco IOS es más estructurada y clara. GRE sigue aportando el soporte multiprotocolo y la posibilidad de correr protocolos de enrutamiento dinámico sobre el túnel.
+| Aspecto | GRE + Crypto Map (IKEv1) | GRE + tunnel protection (IKEv2) |
+|---|---|---|
+| Aplicación del cifrado | Crypto Map en `e0/0` | `tunnel protection ipsec profile` en `Tunnel0` |
+| ACL de tráfico interesante | Requerida (captura proto 47) | No necesaria |
+| Transform Set modo | Tunnel | **Transport** (GRE ya encapsula) |
+| PSK en keyring | `crypto isakmp key` | `pre-shared-key local` + `pre-shared-key remote` |
 
 ```
 [Paquete original PC1→PC2]
         ↓ GRE encapsula (tunnel mode gre ip)
 [GRE Header | Paquete original]
-        ↓ IKEv2 + IPSec cifra (ESP, Crypto Map en e0/0)
-[IP WAN | ESP | GRE cifrado] → Cloud NAT → R2 descifra → desencapsula → PC2
+        ↓ IPSec IKEv2 cifra en modo Transport (tunnel protection)
+[IP WAN | ESP | GRE cifrado] → Cloud NAT → R2 → descifra → desencapsula → PC2
 ```
 
 ---
@@ -62,8 +67,8 @@ Respecto al Lab 03 (GRE over IKEv1), la arquitectura de encapsulamiento es idén
                   │ e0/0: 192.168.19.5                     │ e0/0: 192.168.19.6
           ┌───────┴────────┐                      ┌────────┴───────┐
           │   R1 (Peer A)  │◄══ GRE over IPSec ═══►  R2 (Peer B)  │
-          │                │     IKEv2 + Crypto    │               │
-          └───────┬────────┘         Map           └────────┬──────┘
+          │                │   IKEv2 + transport   │               │
+          └───────┬────────┘   tunnel protection   └────────┬──────┘
                   │ e0/1: 202.50.73.129/25                  │ e0/1: 202.50.73.1/25
                   │                                         │
           ┌───────┴────────┐                      ┌─────────┴──────┐
@@ -78,15 +83,8 @@ Respecto al Lab 03 (GRE over IKEv1), la arquitectura de encapsulamiento es idén
            202.50.73.128/25                        202.50.73.0/25
 ```
 
-> El túnel GRE se establece entre `192.168.19.5` (R1 e0/0) y `192.168.19.6` (R2 e0/0).  
-> La red interna del túnel es `10.0.0.0/30`. El Crypto Map con IKEv2 se aplica en `e0/0` para cifrar todo el tráfico GRE.
-
-**Flujo de encapsulamiento:**
-1. PC1 envía tráfico a PC2 → R1 lo encamina por `Tunnel0` (GRE).
-2. GRE encapsula el paquete: nuevo header IP src `192.168.19.5` → dst `192.168.19.6`.
-3. La ACL detecta el paquete GRE (proto 47) → Crypto Map activa IPSec IKEv2.
-4. IKEv2 negocia el canal en 4 mensajes → ESP cifra el paquete GRE completo.
-5. El paquete cifrado viaja por Cloud NAT hasta R2 → descifra → desencapsula GRE → entrega a PC2.
+> El túnel GRE se levanta entre `192.168.19.5` (R1) y `192.168.19.6` (R2), con `10.0.0.0/30` como red interna.  
+> El cifrado IKEv2 se aplica directamente sobre `Tunnel0` via `tunnel protection` — sin Crypto Map ni ACL.
 
 ---
 
@@ -125,61 +123,51 @@ Respecto al Lab 03 (GRE over IKEv1), la arquitectura de encapsulamiento es idén
 
 | Parámetro  | Valor               | Descripción                                             |
 |------------|---------------------|---------------------------------------------------------|
-| Nombre     | `IKEv2_PROP`        | Identificador del proposal                              |
+| Nombre     | `PROP_IKEv2_GRE`    | Identificador del proposal                              |
 | Cifrado    | AES-CBC-256         | Cifrado simétrico del canal IKEv2                       |
 | Integridad | SHA-256             | Verificación de integridad de mensajes IKEv2            |
 | Grupo DH   | Group 14 (2048-bit) | Intercambio Diffie-Hellman para derivar clave de sesión |
 
-### IKEv2 Policy
-
-| Parámetro | Valor        | Descripción                                  |
-|-----------|--------------|----------------------------------------------|
-| Nombre    | `IKEv2_POL`  | Política que asocia el proposal al peer       |
-| Proposal  | `IKEv2_PROP` | Vincula la política al conjunto de algoritmos |
+> **Nota:** No se incluye `prf sha256` — no soportado en IOSv.
 
 ### IKEv2 Keyring
 
-| Parámetro      | Valor            | Descripción                        |
-|----------------|------------------|------------------------------------|
-| Keyring        | `IKEv2_KEYRING`  | Almacén de claves pre-compartidas  |
-| Peer R1→R2     | 192.168.19.6     | IP del peer remoto desde R1        |
-| Peer R2→R1     | 192.168.19.5     | IP del peer remoto desde R2        |
-| Pre-Shared Key | `ITLA2025Arlene` | Clave idéntica en ambos routers    |
+| Parámetro              | Valor            | Descripción                                                    |
+|------------------------|------------------|----------------------------------------------------------------|
+| Keyring                | `KR_GRE`         | Almacén de claves pre-compartidas                              |
+| PSK local              | `ITLA2025Arlene` | Clave que este router envía al peer                            |
+| PSK remote             | `ITLA2025Arlene` | Clave que este router espera recibir del peer                  |
+
+> En IOSv es obligatorio definir `pre-shared-key local` y `pre-shared-key remote` por separado. Si solo se usa `pre-shared-key`, la negociación IKEv2 falla.
 
 ### IKEv2 Profile
 
 | Parámetro      | Valor            | Descripción                                    |
 |----------------|------------------|------------------------------------------------|
-| Nombre         | `IKEv2_PROFILE`  | Agrupa keyring, identidad y autenticación       |
+| Nombre         | `PROF_IKEv2_GRE` | Agrupa keyring, identidad y autenticación       |
 | Match Identity | address (IP WAN) | Identifica al peer por su dirección IP pública |
 | Authentication | pre-share        | Método de autenticación local y remota         |
-| Keyring        | `IKEv2_KEYRING`  | Referencia al keyring con la PSK               |
 
-### IPSec Transform Set y Crypto Map
+### IPSec Transform Set y Profile
 
-| Parámetro      | Valor              | Descripción                                        |
-|----------------|--------------------|----------------------------------------------------|
-| Transform Set  | `TS_AES256_SHA256` | ESP-AES-256 + ESP-SHA256-HMAC, modo Tunnel         |
-| Crypto Map     | `CMAP_GRE_IKEv2`   | Aplicado en `e0/0`, referencia el IKEv2 Profile    |
-| Lifetime SA    | 3600 s (1 h)       | Duración del túnel de datos antes de renegociar    |
-
-### Tráfico Interesante — ACL para cifrar GRE
-
-| Router | ACL              | Fuente        | Destino       | Protocolo |
-|--------|------------------|---------------|---------------|-----------|
-| R1     | `ACL_GRE_IKEv2`  | 192.168.19.5  | 192.168.19.6  | GRE (47)  |
-| R2     | `ACL_GRE_IKEv2`  | 192.168.19.6  | 192.168.19.5  | GRE (47)  |
-
-> La ACL captura el tráfico **GRE entre IPs WAN** — no las LANs directamente. Todo lo que GRE encapsula queda protegido automáticamente por IPSec.
+| Parámetro      | Valor                   | Descripción                                                             |
+|----------------|-------------------------|-------------------------------------------------------------------------|
+| Transform Set  | `TS_GRE_V2`             | ESP-AES-256 + ESP-SHA256-HMAC                                           |
+| Modo           | **Transport**           | GRE ya encapsula — IPSec solo cifra el payload GRE, no re-encapsula    |
+| IPSec Profile  | `GRE_IPSEC_PROFILE_V2`  | Aplicado en `Tunnel0` con `tunnel protection`                           |
+| Lifetime SA    | 3600 s (1 h)            | Duración del túnel de datos antes de renegociar                         |
 
 ### Túnel GRE
 
-| Parámetro          | R1            | R2            |
-|--------------------|---------------|---------------|
-| IP Tunnel          | 10.0.0.1/30   | 10.0.0.2/30   |
-| Tunnel Source      | Ethernet0/0   | Ethernet0/0   |
-| Tunnel Destination | 192.168.19.6  | 192.168.19.5  |
-| Tunnel Mode        | gre ip        | gre ip        |
+| Parámetro          | R1                      | R2                      |
+|--------------------|-------------------------|-------------------------|
+| IP Tunnel          | 10.0.0.1/30             | 10.0.0.2/30             |
+| Tunnel Source      | Ethernet0/0             | Ethernet0/0             |
+| Tunnel Destination | 192.168.19.6            | 192.168.19.5            |
+| Tunnel Mode        | gre ip                  | gre ip                  |
+| IP MTU             | 1400                    | 1400                    |
+| TCP MSS            | 1360                    | 1360                    |
+| Protection         | GRE_IPSEC_PROFILE_V2    | GRE_IPSEC_PROFILE_V2    |
 
 ---
 
@@ -208,59 +196,57 @@ interface Ethernet0/1
 
 ip route 0.0.0.0 0.0.0.0 192.168.19.2
 
-! ── Paso 1: Túnel GRE ────────────────────────────────────────
-interface Tunnel0
- description GRE-Tunnel-hacia-R2
- ip address 10.0.0.1 255.255.255.252
- tunnel source Ethernet0/0
- tunnel destination 192.168.19.6
- tunnel mode gre ip
-
-! ── Paso 2: Ruta hacia LAN remota vía Tunnel0 ────────────────
-ip route 202.50.73.0 255.255.255.128 Tunnel0
-
-! ── Paso 3: IKEv2 Proposal ──────────────────────────────────
-crypto ikev2 proposal IKEv2_PROP
+! ── Paso 1: IKEv2 Proposal ──────────────────────────────────
+! Nota: no incluir "prf sha256" — no soportado en IOSv
+crypto ikev2 proposal PROP_IKEv2_GRE
  encryption aes-cbc-256
  integrity sha256
  group 14
 
-! ── Paso 4: IKEv2 Policy ────────────────────────────────────
-crypto ikev2 policy IKEv2_POL
- proposal IKEv2_PROP
+! ── Paso 2: IKEv2 Policy ────────────────────────────────────
+crypto ikev2 policy POL_IKEv2_GRE
+ proposal PROP_IKEv2_GRE
 
-! ── Paso 5: IKEv2 Keyring (PSK) ─────────────────────────────
-crypto ikev2 keyring IKEv2_KEYRING
+! ── Paso 3: IKEv2 Keyring ───────────────────────────────────
+! En IOSv es obligatorio definir local y remote por separado
+crypto ikev2 keyring KR_GRE
  peer R2
   address 192.168.19.6
-  pre-shared-key ITLA2025Arlene
+  pre-shared-key local  ITLA2025Arlene
+  pre-shared-key remote ITLA2025Arlene
 
-! ── Paso 6: IKEv2 Profile ───────────────────────────────────
-crypto ikev2 profile IKEv2_PROFILE
+! ── Paso 4: IKEv2 Profile ───────────────────────────────────
+crypto ikev2 profile PROF_IKEv2_GRE
  match identity remote address 192.168.19.6 255.255.255.255
- authentication remote pre-share
  authentication local pre-share
- keyring local IKEv2_KEYRING
+ authentication remote pre-share
+ keyring local KR_GRE
 
-! ── Paso 7: Transform Set ───────────────────────────────────
-crypto ipsec transform-set TS_AES256_SHA256 esp-aes 256 esp-sha256-hmac
- mode tunnel
+! ── Paso 5: Transform Set en modo Transport ──────────────────
+! GRE ya encapsula — IPSec usa transport, no tunnel
+crypto ipsec transform-set TS_GRE_V2 esp-aes 256 esp-sha256-hmac
+ mode transport
 
-! ── Paso 8: ACL — cifrar tráfico GRE entre peers WAN ────────
-ip access-list extended ACL_GRE_IKEv2
- permit gre host 192.168.19.5 host 192.168.19.6
-
-! ── Paso 9: Crypto Map ──────────────────────────────────────
-crypto map CMAP_GRE_IKEv2 10 ipsec-isakmp
- set peer 192.168.19.6
- set transform-set TS_AES256_SHA256
- set ikev2-profile IKEv2_PROFILE
- match address ACL_GRE_IKEv2
+! ── Paso 6: IPSec Profile ───────────────────────────────────
+crypto ipsec profile GRE_IPSEC_PROFILE_V2
+ set transform-set TS_GRE_V2
+ set ikev2-profile PROF_IKEv2_GRE
  set security-association lifetime seconds 3600
 
-! ── Paso 10: Aplicar Crypto Map en interfaz WAN ─────────────
-interface Ethernet0/0
- crypto map CMAP_GRE_IKEv2
+! ── Paso 7: Interfaz Tunnel GRE protegida con IPSec IKEv2 ───
+interface Tunnel0
+ description GRE-over-IPSec-IKEv2-hacia-R2
+ ip address 10.0.0.1 255.255.255.252
+ ip mtu 1400
+ ip tcp adjust-mss 1360
+ tunnel source Ethernet0/0
+ tunnel destination 192.168.19.6
+ tunnel mode gre ip
+ tunnel protection ipsec profile GRE_IPSEC_PROFILE_V2
+ no shutdown
+
+! ── Paso 8: Ruta estática hacia LAN remota vía Tunnel0 ───────
+ip route 202.50.73.0 255.255.255.128 Tunnel0
 ```
 
 ### R2 — Site B
@@ -286,59 +272,54 @@ interface Ethernet0/1
 
 ip route 0.0.0.0 0.0.0.0 192.168.19.2
 
-! ── Paso 1: Túnel GRE ────────────────────────────────────────
-interface Tunnel0
- description GRE-Tunnel-hacia-R1
- ip address 10.0.0.2 255.255.255.252
- tunnel source Ethernet0/0
- tunnel destination 192.168.19.5
- tunnel mode gre ip
-
-! ── Paso 2: Ruta hacia LAN remota vía Tunnel0 ────────────────
-ip route 202.50.73.128 255.255.255.128 Tunnel0
-
-! ── Paso 3: IKEv2 Proposal ──────────────────────────────────
-crypto ikev2 proposal IKEv2_PROP
+! ── Paso 1: IKEv2 Proposal ──────────────────────────────────
+crypto ikev2 proposal PROP_IKEv2_GRE
  encryption aes-cbc-256
  integrity sha256
  group 14
 
-! ── Paso 4: IKEv2 Policy ────────────────────────────────────
-crypto ikev2 policy IKEv2_POL
- proposal IKEv2_PROP
+! ── Paso 2: IKEv2 Policy ────────────────────────────────────
+crypto ikev2 policy POL_IKEv2_GRE
+ proposal PROP_IKEv2_GRE
 
-! ── Paso 5: IKEv2 Keyring (PSK) ─────────────────────────────
-crypto ikev2 keyring IKEv2_KEYRING
+! ── Paso 3: IKEv2 Keyring ───────────────────────────────────
+crypto ikev2 keyring KR_GRE
  peer R1
   address 192.168.19.5
-  pre-shared-key ITLA2025Arlene
+  pre-shared-key local  ITLA2025Arlene
+  pre-shared-key remote ITLA2025Arlene
 
-! ── Paso 6: IKEv2 Profile ───────────────────────────────────
-crypto ikev2 profile IKEv2_PROFILE
+! ── Paso 4: IKEv2 Profile ───────────────────────────────────
+crypto ikev2 profile PROF_IKEv2_GRE
  match identity remote address 192.168.19.5 255.255.255.255
- authentication remote pre-share
  authentication local pre-share
- keyring local IKEv2_KEYRING
+ authentication remote pre-share
+ keyring local KR_GRE
 
-! ── Paso 7: Transform Set ───────────────────────────────────
-crypto ipsec transform-set TS_AES256_SHA256 esp-aes 256 esp-sha256-hmac
- mode tunnel
+! ── Paso 5: Transform Set en modo Transport ──────────────────
+crypto ipsec transform-set TS_GRE_V2 esp-aes 256 esp-sha256-hmac
+ mode transport
 
-! ── Paso 8: ACL — cifrar tráfico GRE entre peers WAN ────────
-ip access-list extended ACL_GRE_IKEv2
- permit gre host 192.168.19.6 host 192.168.19.5
-
-! ── Paso 9: Crypto Map ──────────────────────────────────────
-crypto map CMAP_GRE_IKEv2 10 ipsec-isakmp
- set peer 192.168.19.5
- set transform-set TS_AES256_SHA256
- set ikev2-profile IKEv2_PROFILE
- match address ACL_GRE_IKEv2
+! ── Paso 6: IPSec Profile ───────────────────────────────────
+crypto ipsec profile GRE_IPSEC_PROFILE_V2
+ set transform-set TS_GRE_V2
+ set ikev2-profile PROF_IKEv2_GRE
  set security-association lifetime seconds 3600
 
-! ── Paso 10: Aplicar Crypto Map en interfaz WAN ─────────────
-interface Ethernet0/0
- crypto map CMAP_GRE_IKEv2
+! ── Paso 7: Interfaz Tunnel GRE protegida con IPSec IKEv2 ───
+interface Tunnel0
+ description GRE-over-IPSec-IKEv2-hacia-R1
+ ip address 10.0.0.2 255.255.255.252
+ ip mtu 1400
+ ip tcp adjust-mss 1360
+ tunnel source Ethernet0/0
+ tunnel destination 192.168.19.5
+ tunnel mode gre ip
+ tunnel protection ipsec profile GRE_IPSEC_PROFILE_V2
+ no shutdown
+
+! ── Paso 8: Ruta estática hacia LAN remota vía Tunnel0 ───────
+ip route 202.50.73.128 255.255.255.128 Tunnel0
 ```
 
 ### Hosts (VPCs en PNetLab)
@@ -370,7 +351,7 @@ Tunnel0 is up, line protocol is up
   Tunnel protocol/transport GRE/IP
 ```
 
-> Si `Tunnel0` aparece `down`, verificar primero la conectividad WAN entre los peers (`ping 192.168.19.6`) antes de revisar IPSec.
+> Si `Tunnel0` aparece `down/down`, verificar primero conectividad WAN con `ping 192.168.19.6` desde R1.
 
 ---
 
@@ -388,7 +369,7 @@ Salida esperada:
 Tunnel-id Local                 Remote                fvrf/ivrf            Status
 1         192.168.19.5/500      192.168.19.6/500      none/none            READY
       Encr: AES-CBC, keysize: 256, PRF: SHA256, Hash: SHA256, DH Grp:14, Auth sign: PSK, Auth verify: PSK
-      Life/Active Time: 86400/65 sec
+      Life/Active Time: 86400/72 sec
 ```
 
 ---
@@ -402,17 +383,17 @@ R1# show crypto ipsec sa
 Salida esperada (fragmento):
 
 ```
-interface: Ethernet0/0
-    Crypto map tag: CMAP_GRE_IKEv2, local addr 192.168.19.5
+interface: Tunnel0
+   Crypto map tag: Tunnel0-head-0, local addr 192.168.19.5
 
    local  ident: (192.168.19.5/255.255.255.255/47/0)
    remote ident: (192.168.19.6/255.255.255.255/47/0)
 
-    #pkts encaps: 25, #pkts encrypt: 25, #pkts digest: 25
-    #pkts decaps: 25, #pkts decrypt: 25, #pkts verify: 25
+    #pkts encaps: 20, #pkts encrypt: 20, #pkts digest: 20
+    #pkts decaps: 20, #pkts decrypt: 20, #pkts verify: 20
 ```
 
-> El protocolo `47` en los identifiers confirma que IPSec IKEv2 está cifrando tráfico GRE.
+> El protocolo `47` confirma que IPSec está cifrando tráfico GRE. Nótese que el Crypto Map se genera automáticamente asociado a `Tunnel0`.
 
 ---
 
@@ -422,7 +403,7 @@ interface: Ethernet0/0
 # Desde PC1 hacia PC2
 PC1> ping 202.50.73.2
 
-# Ping al extremo del túnel GRE desde R1
+# Ping al extremo del túnel GRE
 R1# ping 10.0.0.2 source 10.0.0.1
 ```
 
@@ -442,9 +423,11 @@ Success rate is 100 percent (10/10)
 | `show interface tunnel 0` | Estado del túnel GRE (debe ser `up/up`). |
 | `show crypto ikev2 sa` | Estado de la sesión IKEv2. Debe mostrar `READY`. |
 | `show crypto ikev2 sa detailed` | Algoritmos negociados, lifetime y autenticación del peer. |
-| `show crypto ipsec sa` | SAs IPSec activas con protocolo 47 (GRE) en los identifiers. |
-| `show ip access-lists ACL_GRE_IKEv2` | Hits en la ACL que captura tráfico GRE. |
-| `show crypto map` | Confirma el Crypto Map y el IKEv2 Profile asociado en `e0/0`. |
+| `show crypto ipsec sa` | SAs IPSec con protocolo 47 (GRE) en los identifiers. |
+| `show ip route static` | Confirma rutas hacia LANs remotas apuntando a `Tunnel0`. |
+| `show crypto session` | Resumen rápido del estado de la sesión IPSec/IKEv2. |
+
+---
 
 ---
 
@@ -453,7 +436,7 @@ Success rate is 100 percent (10/10)
 | # | Captura | Descripción |
 |---|---|---|
 | 1 | [Topología general](evidencias/1.png) | Topología en PNetLab con nombre y matrícula visibles, todos los nodos encendidos. |
-| 2 | [Config R1 – GRE + IKEv2](evidencias/2.png) | Consola R1: `Tunnel0` GRE configurado e IKEv2 Profile + Crypto Map aplicados en `e0/0`. |
+| 2 | [Config R1 – GRE + IKEv2](evidencias/2.png) | Consola R1: `Tunnel0` GRE con `tunnel protection ipsec profile` y IKEv2 configurados. |
 | 3 | [IKEv2 SA READY + Tunnel up](evidencias/3.png) | Salida de `show crypto ikev2 sa` (`READY`) y `show interface tunnel 0` (`up/up`). |
 | 4 | [Ping exitoso](evidencias/4.png) | Ping exitoso de PC1 (`202.50.73.130`) a PC2 (`202.50.73.2`) con GRE over IKEv2 activo. |
 
@@ -463,7 +446,6 @@ Success rate is 100 percent (10/10)
 
 🎥 **[Ver en YouTube — enlace pendiente](#)**
 
-**Duración estimada:** < 8 minutos
 
 ---
 
